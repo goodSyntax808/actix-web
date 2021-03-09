@@ -1,4 +1,4 @@
-use std::{cell::RefCell, fmt, io, path::PathBuf, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, fmt, io, path::PathBuf, rc::Rc};
 
 use actix_service::{boxed, IntoServiceFactory, ServiceFactory, ServiceFactoryExt};
 use actix_web::{
@@ -12,7 +12,7 @@ use futures_util::future::{ok, FutureExt, LocalBoxFuture};
 
 use crate::{
     directory_listing, named, Directory, DirectoryRenderer, FilesService, HttpNewService,
-    MimeOverride,
+    MimeOverride, NamedFile,
 };
 
 /// Static files handling service.
@@ -38,6 +38,8 @@ pub struct Files {
     file_flags: named::Flags,
     guards: Option<Rc<dyn Guard>>,
     hidden_files: bool,
+    cache_files: bool,
+    cache: Option<HashMap<PathBuf, NamedFile>>,
 }
 
 impl fmt::Debug for Files {
@@ -60,6 +62,7 @@ impl Clone for Files {
             mime_override: self.mime_override.clone(),
             guards: self.guards.clone(),
             hidden_files: self.hidden_files,
+            cache_files: self.cache_files,
         }
     }
 }
@@ -79,11 +82,15 @@ impl Files {
     /// If the mount path is set as the root path `/`, services registered after this one will
     /// be inaccessible. Register more specific handlers and services first.
     ///
+    /// If the `cache_files` option is set to `true`, files will be stored in memory. They
+    /// will not be updated unless the service is restarted. If this option is configured,
+    /// the threadpool will be set to XX threads or blah TODO
+    ///
     /// `Files` uses a threadpool for blocking filesystem operations. By default, the pool uses a
     /// max number of threads equal to `512 * HttpServer::worker`. Real time thread count are
     /// adjusted with work load. More threads would spawn when need and threads goes idle for a
     /// period of time would be de-spawned.
-    pub fn new<T: Into<PathBuf>>(mount_path: &str, serve_from: T) -> Files {
+    pub fn new<T: Into<PathBuf>>(mount_path: &str, serve_from: T, cache_files: bool) -> Files {
         let orig_dir = serve_from.into();
         let dir = match orig_dir.canonicalize() {
             Ok(canon_dir) => canon_dir,
@@ -92,6 +99,8 @@ impl Files {
                 PathBuf::new()
             }
         };
+
+        let files_cache = HashMap::new();
 
         Files {
             path: mount_path.to_owned(),
@@ -105,6 +114,7 @@ impl Files {
             file_flags: named::Flags::default(),
             guards: None,
             hidden_files: false,
+            cache_files: false,
         }
     }
 
@@ -222,6 +232,14 @@ impl Files {
         self.hidden_files = true;
         self
     }
+
+    /// Enables caching static files in memory instead of reading them from the filesystem for
+    /// every request. The cache is not updated once files are loaded.
+    #[inline]
+    pub fn use_file_cache(mut self) -> Self {
+        self.cache_files = true;
+        self
+    }
 }
 
 impl HttpServiceFactory for Files {
@@ -260,6 +278,8 @@ impl ServiceFactory<ServiceRequest> for Files {
             file_flags: self.file_flags,
             guards: self.guards.clone(),
             hidden_files: self.hidden_files,
+            cache_files: self.cache_files,
+            cache: HashMap::new(),
         };
 
         if let Some(ref default) = *self.default.borrow() {

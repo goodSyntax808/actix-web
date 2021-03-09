@@ -1,4 +1,4 @@
-use std::{fmt, io, path::PathBuf, rc::Rc, task::Poll};
+use std::{collections::HashMap, fmt, io, path::PathBuf, rc::Rc, task::Poll};
 
 use actix_service::Service;
 use actix_web::{
@@ -27,6 +27,8 @@ pub struct FilesService {
     pub(crate) file_flags: named::Flags,
     pub(crate) guards: Option<Rc<dyn Guard>>,
     pub(crate) hidden_files: bool,
+    pub(crate) cache_files: bool,
+    pub(crate) cache: HashMap<PathBuf, NamedFile>,
 }
 
 type FilesServiceFuture = Either<
@@ -133,6 +135,22 @@ impl Service<ServiceRequest> for FilesService {
                     FilesError::IsDirectory,
                     req.into_parts().0,
                 )))
+            }
+        } else if self.cache_files {
+            match NamedFile::open(path) {
+                Ok(mut named_file) => {
+                    if let Some(ref mime_override) = self.mime_override {
+                        let new_disposition = mime_override(&named_file.content_type.type_());
+                        named_file.content_disposition.disposition = new_disposition;
+                    }
+                    named_file.flags = self.file_flags;
+                    // wassu
+                    self.cache.insert(path, named_file);
+                    let (req, _) = req.into_parts();
+                    let res = named_file.into_response(&req);
+                    Either::Left(ok(ServiceResponse::new(req, res)))
+                }
+                Err(e) => self.handle_err(e, req),
             }
         } else {
             match NamedFile::open(path) {
